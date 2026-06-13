@@ -1,0 +1,23 @@
+# General
+.direnv/
+.env
+.envrc
+
+# Editors
+DS_Store
+.zed/
+.nvim/
+.vim/
+*.swp
+*~
+Session.vim
+.vscode/
+.idea/
+
+# Nix
+result
+result-*
+
+# Development
+*.log
+tmp/
