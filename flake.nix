@@ -35,6 +35,10 @@
           src = ./src;
 
           nativeBuildInputs = [ pkgs.makeWrapper ];
+          buildInputs = [
+            pkgs.coreutils
+            pkgs.hostname
+          ];
 
           buildPhase = ''
             # Inject dynamic flake version into the bash script
@@ -55,6 +59,8 @@
                 pkgs.lib.makeBinPath [
                   pkgs.restic
                   pkgs.docker
+                  pkgs.coreutils
+                  pkgs.hostname
                 ]
               }
           '';
