@@ -20,17 +20,18 @@ using [`restic`](https://restic.net/) (a fast, secure, and efficient
 backup program).
 
 This repository contains a robust, fault-tolerant Bash script that I built 
-to manage backups across my NixOS VPS instances. While the standard NixOS 
-`services.restic` module is great for declarative files, it lacks dynamic 
-orchestration for Docker containers. I needed a way to safely stop specific 
-databases and services before taking a snapshot to ensure data consistency, 
-without hardcoding service names into my system configuration.
+to manage backups across my NixOS VPS instances. It acts as a thin orchestrator 
+that safely stops specific databases and services before taking a snapshot 
+to ensure data consistency, then reliably brings them back up.
 
 I decided to share it in case someone else running self-hosted Docker stacks 
 finds it useful.
 
 ## Key Features
 
+* **Universal Storage Support**: DSB acts as a thin wrapper around restic, 
+  meaning it natively supports any backend restic supports (S3, B2, SFTP, 
+  Local, etc.). Use the `--option` flag to pass custom backend parameters.
 * **Label-Based Orchestration**: No need to hardcode container names. Just 
   add the `dsb.stop.required=true` label to your `docker-compose.yml`, and 
   the script will automatically discover, stop, and restart those containers 
@@ -41,12 +42,12 @@ finds it useful.
 * **Guaranteed Restarts**: Uses bash `trap` signals. Even if the backup fails, 
   the `restic` binary crashes, or you manually interrupt the script with 
   `Ctrl+C`, your services will be brought back online.
+* **12-Factor Ready**: Supports `RESTIC_REPOSITORY_FILE` and `RESTIC_PASSWORD_FILE`
+  to securely inject configuration without exposing credentials in the process 
+  tree or logs, making it ideal for systemd services and NixOS modules.
 * **Multi-Server Tagging**: Automatically tags snapshots with the system 
   hostname (or custom tags), making it easy to store backups from multiple 
   servers in a single repository and prune them independently.
-* **Nix-Native but Portable**: Comes with a `flake.nix` that wraps the script 
-  with its runtime dependencies. However, it remains a standard script that 
-  works on any Linux distro.
 
 ## Limitations
 
@@ -129,29 +130,39 @@ services:
 > Restic encrypts everything with zero trust. If you lose your password, 
 > your backups are permanently gone. Store your password in a secure manager.
 
-Create a secure file containing your Restic repository password:
+Create a secure file containing your Restic repository URL (optional but recommended) and password:
 
 ```bash
-echo "MySuperSecretPassword" > /root/.restic_password
-chmod 600 /root/.restic_password
+echo "s3:s3.amazonaws.com/my-backup-bucket" > /etc/dsb/repo.txt
+echo "MySuperSecretPassword" > /etc/dsb/pass.txt
+chmod 600 /etc/dsb/*.txt
 ```
 
 ### 3. CLI Examples
 
-**Standard Backup:**
+**Standard Backup (using secure files):**
 ```bash
 dsb \
   --path /services \
+  --repo-file /etc/dsb/repo.txt \
+  --password-file /etc/dsb/pass.txt \
+  backup
+```
+
+**Automated SFTP Backup (preventing hangs):**
+```bash
+dsb \
   --repo sftp:user@host:/backups \
-  --password-file /root/.restic_password \
+  --password-file /etc/dsb/pass.txt \
+  --option sftp.args="-o BatchMode=yes" \
   backup
 ```
 
 **List Backups (Filtering by Tag):**
 ```bash
 dsb \
-  --repo sftp:user@host:/backups \
-  --password-file /root/.restic_password \
+  --repo-file /etc/dsb/repo.txt \
+  --password-file /etc/dsb/pass.txt \
   --tags "vps-web-01" \
   list
 ```
@@ -159,8 +170,8 @@ dsb \
 **Clean Up Old Snapshots:**
 ```bash
 dsb \
-  --repo sftp:user@host:/backups \
-  --password-file /root/.restic_password \
+  --repo-file /etc/dsb/repo.txt \
+  --password-file /etc/dsb/pass.txt \
   --tags "vps-web-01" \
   prune
 ```
@@ -168,8 +179,8 @@ dsb \
 **Safe Restoration (Single File/Folder):**
 ```bash
 dsb \
-  --repo sftp:user@host:/backups \
-  --password-file /root/.restic_password \
+  --repo-file /etc/dsb/repo.txt \
+  --password-file /etc/dsb/pass.txt \
   restic restore latest \
   --target /tmp/recovery \
   --include /services/apps/bulwark
@@ -178,6 +189,8 @@ dsb \
 ## Automation Examples
 
 ### Method A: NixOS Systemd Timers (Recommended)
+
+Because `dsb` executes `restic` as a child process via `bash -c`, any variables defined in the `Environment` or exported within the script are properly inherited.
 
 ```nix
 { config, pkgs, lib, inputs, ... }:
@@ -188,9 +201,8 @@ in {
   # Shared Environment Variables for all tasks
   environment.variables = {
     DSB_BACKUP_PATH = "/services";
-    DSB_RESTIC_REPO = "sftp:backup_user@host:/backups";
-    DSB_RESTIC_PW_FILE = "/root/.restic_password";
-    DSB_SSH_KEY = "/root/.ssh/id_ed25519";
+    RESTIC_REPOSITORY_FILE = "/run/secrets/restic_repo";
+    RESTIC_PASSWORD_FILE = "/run/secrets/restic_password";
   };
 
   # Daily Backup Task
@@ -244,10 +256,10 @@ in {
 
 ```bash
 # Run backup daily at 03:00 AM
-0 3 * * * DSB_RESTIC_REPO="sftp:u@h:/b" DSB_RESTIC_PW_FILE="/r/.rp" /u/l/b/dsb backup >> /var/log/dsb-backup.log 2>&1
+0 3 * * * RESTIC_REPOSITORY_FILE="/etc/dsb/repo.txt" RESTIC_PASSWORD_FILE="/etc/dsb/pass.txt" /usr/local/bin/dsb backup >> /var/log/dsb-backup.log 2>&1
 
 # Run prune weekly on Sunday at 05:00 AM
-0 5 * * 0 DSB_RESTIC_REPO="sftp:u@h:/b" DSB_RESTIC_PW_FILE="/r/.rp" /u/l/b/dsb prune >> /var/log/dsb-prune.log 2>&1
+0 5 * * 0 RESTIC_REPOSITORY_FILE="/etc/dsb/repo.txt" RESTIC_PASSWORD_FILE="/etc/dsb/pass.txt" /usr/local/bin/dsb prune >> /var/log/dsb-prune.log 2>&1
 ```
 
 ## License

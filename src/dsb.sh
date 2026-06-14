@@ -4,34 +4,29 @@
 #
 # This script identifies Docker containers with a specific label, stops them,
 # performs a restic backup of a specified directory (default: /services),
-# and restarts the containers. It supports remote storage via SFTP.
+# and restarts the containers. It acts as a thin orchestrator for restic.
 
 set -o errexit
 set -o nounset
 set -o pipefail
 
 # Default configuration
-readonly DSB_VERSION="0.1.0"
+readonly DSB_VERSION="0.2.0"
 readonly DEFAULT_BACKUP_PATH="/services"
 readonly DEFAULT_STOP_LABEL="dsb.stop.required=true"
-readonly DEFAULT_SSH_PORT="2022"
 
 # Globals for configuration (set via flags or environment)
 DSB_BACKUP_PATH="${DSB_BACKUP_PATH:-$DEFAULT_BACKUP_PATH}"
 DSB_STOP_LABEL="${DSB_STOP_LABEL:-$DEFAULT_STOP_LABEL}"
-DSB_SSH_PORT="${DSB_SSH_PORT:-$DEFAULT_SSH_PORT}"
-DSB_SSH_KEY="${DSB_SSH_KEY:-}"
-DSB_RESTIC_REPO="${DSB_RESTIC_REPO:-${RESTIC_REPOSITORY:-}}"
-DSB_RESTIC_PW_FILE="${DSB_RESTIC_PW_FILE:-${RESTIC_PASSWORD_FILE:-}}"
 DSB_RESTIC_TAGS="${DSB_RESTIC_TAGS:-$(hostname)}"
+
+# Array to hold custom restic options
+declare -a DSB_RESTIC_OPTIONS=()
 
 #######################################
 # Builds the restic command array based on current configuration.
 # Globals:
-#   DSB_RESTIC_REPO
-#   DSB_RESTIC_PW_FILE
-#   DSB_SSH_PORT
-#   DSB_SSH_KEY
+#   DSB_RESTIC_OPTIONS
 #   RESTIC_CMD
 # Arguments:
 #   None
@@ -41,25 +36,11 @@ DSB_RESTIC_TAGS="${DSB_RESTIC_TAGS:-$(hostname)}"
 #   0
 #######################################
 build_restic_cmd() {
-  local ssh_args=()
-  if [[ -n "${DSB_SSH_PORT}" ]] || [[ -n "${DSB_SSH_KEY}" ]]; then
-    if [[ -n "${DSB_SSH_PORT}" ]]; then
-      ssh_args+=("-p" "${DSB_SSH_PORT}")
-    fi
-    if [[ -n "${DSB_SSH_KEY}" ]]; then
-      ssh_args+=("-i" "${DSB_SSH_KEY}")
-    fi
-  fi
+  RESTIC_CMD=(restic)
 
-  RESTIC_CMD=(restic -r "${DSB_RESTIC_REPO}")
-  if [[ -n "${DSB_RESTIC_PW_FILE}" ]]; then
-    RESTIC_CMD+=("-p" "${DSB_RESTIC_PW_FILE}")
-  fi
-  
-  if [[ ${#ssh_args[@]} -gt 0 ]]; then
-    # Join array into a single string for sftp.args
-    RESTIC_CMD+=("-o" "sftp.args=${ssh_args[*]}")
-  fi
+  for opt in "${DSB_RESTIC_OPTIONS[@]}"; do
+    RESTIC_CMD+=("-o" "${opt}")
+  done
 }
 
 # Global array for the restic command
@@ -165,38 +146,35 @@ $(colorize blue "Commands:")
 $(colorize blue "Options:")
   -p, --path PATH           Backup source path (default: ${DEFAULT_BACKUP_PATH})
   -l, --label LABEL         Docker label to filter (default: ${DEFAULT_STOP_LABEL})
-  -r, --repo REPO           Restic repo URL
-  -w, --password-file FILE  Restic password file path
-  -k, --ssh-key KEY         SSH private key path for SFTP
-  -P, --ssh-port PORT       SSH port for SFTP (default: ${DEFAULT_SSH_PORT})
+  -r, --repo REPO           Restic repo URL (sets RESTIC_REPOSITORY)
+  -R, --repo-file FILE      File with repo URL (sets RESTIC_REPOSITORY_FILE)
+  -w, --password-file FILE  Restic password file (sets RESTIC_PASSWORD_FILE)
+  -o, --option OPTION       Custom option for restic (e.g., sftp.args="...")
   -t, --tags TAGS           Comma-separated tags (default: ${DSB_RESTIC_TAGS})
   -v, --version             Show version information
   -h, --help                Show this help message
 
 $(colorize blue "Environment Variables:")
   [Core Config]
-    $(colorize yellow "DSB_BACKUP_PATH")     Backup source path
-    $(colorize yellow "DSB_STOP_LABEL")      Docker label to stop containers
-    $(colorize yellow "DSB_RESTIC_TAGS")     Tags for the backup snapshot
+    $(colorize yellow "DSB_BACKUP_PATH")      Backup source path
+    $(colorize yellow "DSB_STOP_LABEL")       Docker label to stop containers
+    $(colorize yellow "DSB_RESTIC_TAGS")      Tags for the backup snapshot
 
   [Restic Config]
-    $(colorize yellow "DSB_RESTIC_REPO")     Restic repository URL
-    $(colorize yellow "DSB_RESTIC_PW_FILE")  Path to restic password file
-    $(colorize yellow "RESTIC_PASSWORD")     Raw password (alternative to file)
-
-  [SSH/SFTP Config]
-    $(colorize yellow "DSB_SSH_KEY")         Path to SSH private key
-    $(colorize yellow "DSB_SSH_PORT")        SSH port
+    $(colorize yellow "RESTIC_REPOSITORY")      Restic repository URL
+    $(colorize yellow "RESTIC_REPOSITORY_FILE") File with restic repo URL
+    $(colorize yellow "RESTIC_PASSWORD_FILE")   Path to restic password file
+    $(colorize yellow "RESTIC_PASSWORD")        Raw password (alternative to file)
 
 $(colorize blue "Examples:")
-  1. Standard backup to SFTP:
-     ${b} -r sftp:user@host:/backups -w /path/to/pass backup
+  1. Standard backup to S3:
+     ${b} -r s3:s3.amazonaws.com/bucket -w /path/to/pass backup
 
-  2. List backups for a specific server using tags:
-     ${b} -r sftp:user@host:/backups -t "vps-db-01" list
+  2. Automated SFTP backup preventing hangs:
+     ${b} -r sftp:user@host:/dir -o sftp.args="-o BatchMode=yes" backup
 
   3. Restore latest backup using the pass-through command:
-     ${b} -r sftp:user@host:/backups restic restore latest --target /tmp
+     ${b} -r /local/backups restic restore latest --target /tmp
 EOF
 }
 
@@ -330,7 +308,8 @@ verify_containers_stopped() {
     local id="${entry%%:*}"
     local name="${entry#*:}"
     local is_running
-    is_running=$(docker inspect -f '{{.State.Running}}' "${id}" 2>/dev/null || echo "false")
+    is_running=$(docker inspect -f '{{.State.Running}}' "${id}" \
+      2>/dev/null || echo "false")
     if [[ "${is_running}" == "true" ]]; then
       log "error" "Container ${name} (${id}) is still running!"
       status=1
@@ -343,8 +322,8 @@ verify_containers_stopped() {
 # Runs the restic backup command.
 # Globals:
 #   DSB_BACKUP_PATH
-#   DSB_RESTIC_REPO
-#   DSB_RESTIC_PW_FILE
+#   DSB_RESTIC_TAGS
+#   RESTIC_CMD
 # Arguments:
 #   None
 # Outputs:
@@ -354,8 +333,8 @@ verify_containers_stopped() {
 #######################################
 run_restic_backup() {
   log "info" "Starting restic backup of ${DSB_BACKUP_PATH}..."
-  
-  # Ensure repository is initialized if it's a local or sftp path
+
+  # Ensure repository is initialized
   # Restic init returns error if already initialized, we ignore it.
   "${RESTIC_CMD[@]}" init >/dev/null 2>&1 || true
 
@@ -380,8 +359,8 @@ do_backup() {
   local status=0
 
   containers=$(get_labeled_containers)
-  
-  # Guarantee containers are started on script exit, error, or interrupt (Ctrl+C)
+
+  # Guarantee containers start on script exit, error, or interrupt
   if [[ -n "${containers}" ]]; then
     trap 'start_containers "${containers}"' EXIT
   fi
@@ -390,7 +369,7 @@ do_backup() {
     log "error" "Failed to stop all required containers. Aborting backup."
     status=1
   elif ! verify_containers_stopped "${containers}"; then
-    log "error" "Verification failed: containers still running. Aborting backup."
+    log "error" "Verification failed: containers still running."
     status=1
   elif ! run_restic_backup; then
     log "error" "Backup failed!"
@@ -399,7 +378,7 @@ do_backup() {
     log "success" "Backup completed successfully."
   fi
 
-  # Clear trap and start manually so we don't start them twice if script continues
+  # Clear trap and start manually to avoid starting twice
   if [[ -n "${containers}" ]]; then
     trap - EXIT
     start_containers "${containers}"
@@ -411,8 +390,7 @@ do_backup() {
 #######################################
 # Validates the restic repository.
 # Globals:
-#   DSB_RESTIC_REPO
-#   DSB_RESTIC_PW_FILE
+#   RESTIC_CMD
 # Arguments:
 #   None
 # Outputs:
@@ -428,8 +406,7 @@ do_check() {
 #######################################
 # Prunes old snapshots.
 # Globals:
-#   DSB_RESTIC_REPO
-#   DSB_RESTIC_PW_FILE
+#   DSB_RESTIC_TAGS
 #   RESTIC_CMD
 # Arguments:
 #   None
@@ -464,10 +441,10 @@ main() {
     case "$1" in
       -p | --path)          DSB_BACKUP_PATH="$2"; shift 2 ;;
       -l | --label)         DSB_STOP_LABEL="$2"; shift 2 ;;
-      -r | --repo)          DSB_RESTIC_REPO="$2"; shift 2 ;;
-      -w | --password-file) DSB_RESTIC_PW_FILE="$2"; shift 2 ;;
-      -k | --ssh-key)       DSB_SSH_KEY="$2"; shift 2 ;;
-      -P | --ssh-port)      DSB_SSH_PORT="$2"; shift 2 ;;
+      -r | --repo)          export RESTIC_REPOSITORY="$2"; shift 2 ;;
+      -R | --repo-file)     export RESTIC_REPOSITORY_FILE="$2"; shift 2 ;;
+      -w | --password-file) export RESTIC_PASSWORD_FILE="$2"; shift 2 ;;
+      -o | --option)        DSB_RESTIC_OPTIONS+=("$2"); shift 2 ;;
       -t | --tags)          DSB_RESTIC_TAGS="$2"; shift 2 ;;
       -v | --version)       echo "dsb version ${DSB_VERSION}"; return 0 ;;
       -h | --help)          usage; return 0 ;;
@@ -492,12 +469,14 @@ main() {
   build_restic_cmd
 
   # Validate essential config for restic
-  if [[ -z "${DSB_RESTIC_REPO}" ]]; then
-    log "error" "DSB_RESTIC_REPO (or RESTIC_REPOSITORY) is not set."
+  if [[ -z "${RESTIC_REPOSITORY:-}" ]] && \
+     [[ -z "${RESTIC_REPOSITORY_FILE:-}" ]]; then
+    log "error" "RESTIC_REPOSITORY or RESTIC_REPOSITORY_FILE must be set."
     return 1
   fi
-  if [[ -z "${DSB_RESTIC_PW_FILE}" ]] && [[ -z "${RESTIC_PASSWORD:-}" ]]; then
-    log "error" "DSB_RESTIC_PW_FILE is not set."
+  if [[ -z "${RESTIC_PASSWORD_FILE:-}" ]] && \
+     [[ -z "${RESTIC_PASSWORD:-}" ]]; then
+    log "error" "RESTIC_PASSWORD or RESTIC_PASSWORD_FILE must be set."
     return 1
   fi
 
