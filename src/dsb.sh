@@ -11,7 +11,7 @@ set -o nounset
 set -o pipefail
 
 # Default configuration
-readonly DSB_VERSION="0.2.0"
+readonly DSB_VERSION="0.2.1"
 readonly DEFAULT_BACKUP_PATH="/services"
 readonly DEFAULT_STOP_LABEL="dsb.stop.required=true"
 
@@ -224,21 +224,22 @@ get_labeled_containers() {
 # Globals:
 #   None
 # Arguments:
-#   1: Space-separated list of container IDs
+#   1: Newline-separated list of container IDs
 # Outputs:
 #   Writes progress logs to stdout.
 # Returns:
 #   0 if all stopped successfully, 1 if any failed.
 #######################################
 stop_containers() {
-  local containers
-  read -ra containers <<< "$1"
   local status=0
 
-  if [[ ${#containers[@]} -eq 0 ]]; then
+  if [[ -z "${1:-}" ]]; then
     log "info" "No containers to stop."
     return 0
   fi
+
+  local containers
+  mapfile -t containers <<< "$1"
 
   log "info" "Stopping labeled containers..."
   for entry in "${containers[@]}"; do
@@ -258,19 +259,19 @@ stop_containers() {
 # Globals:
 #   None
 # Arguments:
-#   1: Space-separated list of container IDs
+#   1: Newline-separated list of container IDs
 # Outputs:
 #   Writes progress logs to stdout.
 # Returns:
 #   0
 #######################################
 start_containers() {
-  local containers
-  read -ra containers <<< "$1"
-
-  if [[ ${#containers[@]} -eq 0 ]]; then
+  if [[ -z "${1:-}" ]]; then
     return 0
   fi
+
+  local containers
+  mapfile -t containers <<< "$1"
 
   log "info" "Starting containers back up..."
   for entry in "${containers[@]}"; do
@@ -288,20 +289,21 @@ start_containers() {
 # Globals:
 #   None
 # Arguments:
-#   1: Space-separated list of container IDs
+#   1: Newline-separated list of container IDs
 # Outputs:
 #   Writes progress logs to stdout.
 # Returns:
 #   0 if all stopped, 1 if any are still running.
 #######################################
 verify_containers_stopped() {
-  local containers
-  read -ra containers <<< "$1"
   local status=0
 
-  if [[ ${#containers[@]} -eq 0 ]]; then
+  if [[ -z "${1:-}" ]]; then
     return 0
   fi
+
+  local containers
+  mapfile -t containers <<< "$1"
 
   log "info" "Verifying containers are stopped..."
   for entry in "${containers[@]}"; do
